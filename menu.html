@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Jay's Menu — Category Cards with Sorting</title>
+<style>
+  :root{
+    --accent1:#ff8c00;
+    --accent2:#ff0080;
+    --card-bg: rgba(255,255,255,0.95);
+    --muted:#666;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+  }
+
+  body{margin:0;background:#fbfbfb;color:#111}
+  .container{max-width:1200px;margin:0 auto;padding:20px}
+
+  .top-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .section-title{font-size:2rem;font-weight:800;background:linear-gradient(45deg,var(--accent1),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin:18px 0}
+  
+  /* Top tabs */
+  .tabs { display:flex; gap:10px; overflow-x:auto; padding:8px 0; }
+  .tabs button { padding:8px 14px; border-radius:999px; border:none; background:#eee; cursor:pointer; font-weight:700; flex:0 0 auto; }
+  .tabs button.active { background:linear-gradient(135deg,var(--accent1),var(--accent2)); color:#fff; transform:translateY(-2px); }
+
+  /* Global sort */
+  .global-controls { display:flex; gap:10px; align-items:center; }
+  .select { padding:8px 10px; border-radius:8px; border:1px solid #e6e6e6; background:#fff; }
+
+  /* wrapper for cards (horizontal scroll) */
+  #menu-wrapper { display:flex; gap:22px; overflow-x:auto; padding:18px 6px; scroll-behavior:smooth; }
+  #menu-wrapper::-webkit-scrollbar{height:10px}
+  #menu-wrapper::-webkit-scrollbar-thumb{background:linear-gradient(45deg,var(--accent1),var(--accent2));border-radius:10px}
+
+  /* category card */
+  .category-box {
+    min-width:320px; max-width:320px; height:420px;
+    background:var(--card-bg);
+    border-radius:20px; padding:18px; box-shadow:0 12px 30px rgba(0,0,0,0.12);
+    display:flex; flex-direction:column; position:relative;
+  }
+
+  .card-header{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px}
+  .category-title{font-size:1.15rem; font-weight:800; color:var(--accent2); text-transform:capitalize}
+  .cat-controls { display:flex; gap:8px; align-items:center; }
+
+  /* items list (vertical scroll) */
+  .items-list { overflow-y:auto; flex:1; padding-right:6px }
+  .items-list::-webkit-scrollbar{width:8px}
+  .items-list::-webkit-scrollbar-thumb{background:#e0e0e0;border-radius:8px}
+
+  .item-row { padding:10px 8px; border-bottom:1px dashed #eee; display:flex; flex-direction:column; gap:6px; }
+  .item-name { font-weight:700; font-size:15px; color:#111; }
+  .item-price { color:var(--accent1); font-weight:800; font-size:14px; }
+
+  /* small helper for empty */
+  .empty { color:var(--muted); text-align:center; padding:30px 8px }
+
+  @media (max-width:880px){
+    .category-box { min-width:280px; max-width:280px; height:380px }
+  }
+  @media (max-width:520px){
+    .top-row { flex-direction:column; align-items:stretch }
+    .global-controls { justify-content:space-between }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="section-title">Our Menu</h1>
+
+    <div class="top-row">
+      <div class="tabs" id="tabs"></div>
+
+      <div class="global-controls">
+        <label style="font-weight:700;color:var(--muted);margin-right:6px">Sort (global):</label>
+        <select id="globalSort" class="select" aria-label="Global sort">
+          <option value="default">Default</option>
+          <option value="price_desc">Price: High → Low</option>
+          <option value="price_asc">Price: Low → High</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Horizontal category cards -->
+    <div id="menu-wrapper" aria-live="polite"></div>
+  </div>
+
+<script>
+/* ------------------ CONFIG ------------------ */
+/* CSV published URL for your sheet (Category | Item Name | Price) */
+const SHEET_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT_QBHC1Exe-uQteyqG9qm-J7GPg1Wb_f1ZsvAjlYsKh-wO7cKoaQyF0CKhZmu82CzDcrIp_ywSm_UI/pub?output=csv";
+
+/* ------------------ STATE ------------------ */
+let grouped = {};                 // { category: [ {name, price, rawPrice} ] }
+let categoriesOrder = [];         // order found in sheet
+let globalSort = "default";       // 'default' | 'price_desc' | 'price_asc'
+let categorySortMap = {};         // per-category sort state
+
+/* ------------------ UTIL: robust CSV parse (simple, supports quoted fields) ------------------ */
+function parseCSV(text){
+  const lines = [];
+  let cur = "";
+  let row = [];
+  let inQuotes = false;
+
+  for (let i=0;i<text.length;i++){
+    const ch = text[i];
+    const next = text[i+1];
+
+    if (ch === '"' ) {
+      if (inQuotes && next === '"') { cur += '"'; i++; continue; } // escaped quote
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (ch === ',' && !inQuotes) {
+      row.push(cur);
+      cur = "";
+      continue;
+    }
+
+    if ((ch === '\n' || ch === '\r') && !inQuotes) {
+      if (cur !== "" || row.length>0) row.push(cur);
+      if (row.length>0) lines.push(row);
+      row = [];
+      cur = "";
+      // handle \r\n skip next \n
+      if (ch === '\r' && next === '\n') i++;
+      continue;
+    }
+
+    cur += ch;
+  }
+  // final
+  if (cur !== "" || row.length>0) row.push(cur);
+  if (row.length>0) lines.push(row);
+  return lines;
+}
+
+/* ------------------ UTIL: parse price to number ------------------ */
+function parsePrice(val){
+  if (val == null) return NaN;
+  // remove currency symbols, spaces, commas
+  const cleaned = String(val).replace(/[^\d.\-]/g,'').trim();
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? NaN : n;
+}
+
+/* ------------------ LOAD SHEET ------------------ */
+async function loadSheet(){
+  try {
+    const res = await fetch(SHEET_CSV);
+    if (!res.ok) throw new Error("Network response not ok: "+res.status);
+    const txt = await res.text();
+    const rows = parseCSV(txt);
+
+    if (rows.length < 2) {
+      document.getElementById('menu-wrapper').innerHTML = '<div class="empty">No data found in sheet.</div>';
+      return;
+    }
+
+    // header row expected: Category | Item Name | Price
+    const header = rows[0].map(h => String(h || "").trim().toLowerCase());
+    const a = header.map(h=>h.replace(/\s+/g,''));
+    const colCategory = a.indexOf('category');
+    const colName = a.indexOf('itemname') !== -1 ? a.indexOf('itemname') : a.indexOf('name');
+    const colPrice = a.indexOf('price');
+
+    if (colCategory === -1 || colName === -1 || colPrice === -1) {
+      document.getElementById('menu-wrapper').innerHTML = '<div class="empty">Sheet headers must be: Category, Item Name, Price</div>';
+      return;
+    }
+
+    grouped = {};
+    categoriesOrder = [];
+
+    // iterate rows starting at 1
+    for (let i=1;i<rows.length;i++){
+      const r = rows[i];
+      // ignore empty rows
+      if (!r || r.length === 0) continue;
+      const rawCat = (r[colCategory] || "").trim();
+      const rawName = (r[colName] || "").trim();
+      const rawPrice = (r[colPrice] || "").trim();
+      if (!rawCat || !rawName) continue;
+
+      const cat = rawCat.toLowerCase();
+      if (!grouped[cat]) {
+        grouped[cat] = [];
+        categoriesOrder.push(cat);
+        categorySortMap[cat] = 'default';
+      }
+
+      const priceNum = parsePrice(rawPrice);
+      grouped[cat].push({
+        name: rawName,
+        priceText: rawPrice,
+        price: priceNum
+      });
+    }
+
+    renderAll(); // initial render
+    renderTabs();
+  } catch (e) {
+    console.error(e);
+    document.getElementById('menu-wrapper').innerHTML = '<div class="empty">Failed to load sheet. Make sure sheet is published and URL is correct.</div>';
+  }
+}
+
+/* ------------------ RENDER TOP TABS (auto categories) ------------------ */
+function renderTabs(){
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = '';
+
+  const allBtn = document.createElement('button');
+  allBtn.textContent = 'All';
+  allBtn.className = 'active';
+  allBtn.onclick = ()=>{ setActiveTabAndFilter('all', allBtn); };
+  tabs.appendChild(allBtn);
+
+  categoriesOrder.forEach(cat=>{
+    const b = document.createElement('button');
+    b.textContent = capitalize(cat);
+    b.onclick = ()=>{ setActiveTabAndFilter(cat, b); };
+    tabs.appendChild(b);
+  });
+}
+
+/* helper: when tab clicked */
+function setActiveTabAndFilter(cat, btn){
+  document.querySelectorAll('#tabs button').forEach(x=>x.classList.remove('active'));
+  btn.classList.add('active');
+  // scroll the card into view if it's visible
+  if (cat !== 'all') {
+    renderAll(cat);
+    // find the card and scroll it into center
+    const card = document.querySelector(`.category-box[data-cat="${cat}"]`);
+    if (card) card.scrollIntoView({behavior:'smooth', inline:'center'});
+  } else {
+    renderAll('all');
+  }
+}
+
+/* ------------------ RENDER ALL CARDS (optionally filter one category) ------------------ */
+function renderAll(filter='all'){
+  const wrapper = document.getElementById('menu-wrapper');
+  wrapper.innerHTML = '';
+
+  const cats = filter === 'all' ? categoriesOrder : [filter];
+  if (!cats || cats.length === 0) {
+    wrapper.innerHTML = '<div class="empty">No categories found.</div>';
+    return;
+  }
+
+  cats.forEach(cat=>{
+    const items = grouped[cat] ? [...grouped[cat]] : [];
+    if (!items.length) return;
+
+    // apply global sort if set, otherwise apply category-level sort
+    const catSort = categorySortMap[cat] || 'default';
+    const effectiveSort = (globalSort && globalSort !== 'default') ? globalSort : catSort;
+    sortItemsArray(items, effectiveSort);
+
+    const card = document.createElement('div');
+    card.className = 'category-box';
+    card.setAttribute('data-cat', cat);
+
+    // header with title and per-cat sort
+    const header = document.createElement('div');
+    header.className = 'card-header';
+    header.innerHTML = `<div class="category-title">${capitalize(cat)}</div>`;
+    const controls = document.createElement('div');
+    controls.className = 'cat-controls';
+
+    // per-category sort select
+    const sel = document.createElement('select');
+    sel.className = 'select';
+    sel.innerHTML = `<option value="default">Sort</option>
+                     <option value="price_desc">Price: High → Low</option>
+                     <option value="price_asc">Price: Low → High</option>`;
+    sel.value = categorySortMap[cat] || 'default';
+    sel.onchange = (e)=>{
+      categorySortMap[cat] = e.target.value;
+      // if global sort active, it overrides; when global default, per-cat applies
+      renderAll(document.querySelector('#tabs button.active')?.textContent?.toLowerCase() === 'all' ? 'all' : e.target.closest('.category-box')?.dataset.cat || 'all');
+    };
+
+    // a small label for clarity
+    const lbl = document.createElement('div');
+    lbl.style.fontSize = '12px';
+    lbl.style.color = 'var(--muted)';
+    lbl.textContent = '';
+
+    controls.appendChild(sel);
+    header.appendChild(controls);
+    card.appendChild(header);
+
+    // items list
+    const list = document.createElement('div');
+    list.className = 'items-list';
+
+    items.forEach(it=>{
+      const row = document.createElement('div');
+      row.className = 'item-row';
+      row.innerHTML = `<div class="item-name">${escapeHtml(it.name)}</div>
+                       <div class="item-price">${isNaN(it.price) ? escapeHtml(it.priceText || '') : '₹' + it.price.toFixed(0)}</div>`;
+      list.appendChild(row);
+    });
+
+    card.appendChild(list);
+    wrapper.appendChild(card);
+  });
+}
+
+/* ------------------ SORT HELPERS ------------------ */
+function sortItemsArray(arr, mode){
+  if (!arr || !Array.isArray(arr)) return;
+  if (mode === 'price_desc') {
+    arr.sort((a,b)=> (isNaN(b.price)?-Infinity:b.price) - (isNaN(a.price)?-Infinity:a.price));
+  } else if (mode === 'price_asc') {
+    arr.sort((a,b)=> (isNaN(a.price)?Infinity:a.price) - (isNaN(b.price)?Infinity:b.price));
+  } else {
+    // default: preserve original order (by original grouped array order)
+  }
+}
+
+/* ------------------ GLOBAL SORT UI ------------------ */
+document.addEventListener('change', (e)=>{
+  if (!e.target) return;
+  if (e.target.id === 'globalSort'){
+    globalSort = e.target.value;
+    // re-render: if global != default, it overrides per-category; else per-cat applies
+    renderAll(document.querySelector('#tabs button.active')?.textContent?.toLowerCase() === 'all' ? 'all' : document.querySelector('#tabs button.active')?.textContent?.toLowerCase());
+  }
+});
+
+/* ------------------ small utilities ------------------ */
+function capitalize(s){ return s && s.length ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+function escapeHtml(str){ return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* ------------------ start loading ------------------ */
+loadSheet();
+
+</script>
+</body>
+</html>
